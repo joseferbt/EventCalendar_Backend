@@ -95,6 +95,25 @@ class EventSerializer(serializers.ModelSerializer):
     def get_completed_tasks(self, obj) -> int:
         return self._get_metrics(obj)["completed_tasks"]
 
+    def validate(self, attrs):
+        user = self.context.get("request").user if "request" in self.context else None
+        tasks_data = attrs.get("tasks", [])
+        if user and tasks_data:
+            from apps.tasks.services import TaskService
+            daily_hours = {}
+            for task_data in tasks_data:
+                s_date = task_data.get("scheduled_date")
+                e_hours = task_data.get("estimated_hours")
+                if s_date and e_hours:
+                    daily_hours[s_date] = daily_hours.get(s_date, Decimal("0.00")) + Decimal(str(e_hours))
+            for s_date, total_add_hours in daily_hours.items():
+                TaskService.validate_daily_overload(
+                    user=user,
+                    target_date=s_date,
+                    additional_hours=total_add_hours,
+                )
+        return attrs
+
     # --- LÓGICA DE CREACIÓN  ---
     def create(self, validated_data):
         # 1. Asignamos el usuario 

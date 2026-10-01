@@ -69,7 +69,9 @@ class LogisticTaskViewSet(viewsets.ModelViewSet):
         Si la nueva fecha excede el límite diario del usuario, retorna HTTP 409 Conflict.
         """
         task = self.get_object()
-        serializer = RescheduleTaskSerializer(data=request.data)
+        serializer = RescheduleTaskSerializer(
+            data=request.data, context={"task": task, "request": request}
+        )
         serializer.is_valid(raise_exception=True)
 
         updated_task = TaskService.reschedule_task(

@@ -123,9 +123,33 @@ class LogisticTaskSerializer(serializers.ModelSerializer):
 class RescheduleTaskSerializer(serializers.Serializer):
     """Serializer para la acción de reprogramación de una tarea."""
 
-    new_date = serializers.DateField(required=True)
-    new_hours = serializers.DecimalField(max_digits=4, decimal_places=2, required=True)
-    reason = serializers.CharField(required=True, min_length=5)
+    new_date = serializers.DateField(required=False)
+    scheduled_date = serializers.DateField(required=False)
+    new_hours = serializers.DecimalField(max_digits=4, decimal_places=2, required=False)
+    estimated_hours = serializers.DecimalField(max_digits=4, decimal_places=2, required=False)
+    reason = serializers.CharField(required=False, default="Reprogramación de tarea")
+
+    def validate(self, attrs):
+        task = self.context.get("task")
+        new_date = attrs.get("new_date") or attrs.get("scheduled_date")
+        if not new_date:
+            raise serializers.ValidationError({"new_date": "La nueva fecha es requerida."})
+        attrs["new_date"] = new_date
+
+        new_hours = attrs.get("new_hours")
+        if new_hours is None:
+            new_hours = attrs.get("estimated_hours")
+        if new_hours is None and task:
+            new_hours = task.estimated_hours
+        elif new_hours is None:
+            raise serializers.ValidationError({"new_hours": "Las horas estimadas son requeridas."})
+        attrs["new_hours"] = new_hours
+
+        reason = attrs.get("reason")
+        if not reason or not str(reason).strip():
+            attrs["reason"] = "Reprogramación de tarea"
+
+        return attrs
 
 
 class RescheduleHistorySerializer(serializers.ModelSerializer):

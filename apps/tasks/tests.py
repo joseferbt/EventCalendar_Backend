@@ -145,3 +145,112 @@ class TaskRescheduleApiTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["results"][0]["event_title"], self.event.title)
         self.assertEqual(response.data["results"][0]["event_course"], self.event.course)
+
+    def test_calculation_excludes_completed_tasks(self):
+        target_date = date.today() + timedelta(days=5)
+        # Tarea completada de 5 horas
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea completada previa",
+            scheduled_date=target_date,
+            estimated_hours=Decimal("5.00"),
+            status=LogisticTask.Status.COMPLETED,
+        )
+        # Tarea pendiente de 4 horas
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea pendiente activa",
+            scheduled_date=target_date,
+            estimated_hours=Decimal("4.00"),
+            status=LogisticTask.Status.PENDING,
+        )
+
+        hours = TaskService.get_daily_scheduled_hours(self.user, target_date)
+        # Debe ser 4.00, excluyendo las 5.00 horas de la tarea completada
+        self.assertEqual(hours, Decimal("4.00"))
+
+    def test_scenario_5h_plus_2h_equals_7h_conflict(self):
+        """
+        Escenario DOD: 5h existentes + 2h a reprogramar = 7h.
+        Supera el límite diario de 6 horas -> retorna HTTP 409 y no guarda cambios.
+        """
+        target_date = date.today() + timedelta(days=3)
+        # 5h ya programadas en la fecha destino
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea existente de 5h",
+            scheduled_date=target_date,
+            estimated_hours=Decimal("5.00"),
+            status=LogisticTask.Status.PENDING,
+        )
+
+        original_date = self.task.scheduled_date
+        original_hours = self.task.estimated_hours
+
+        # Intentar reprogramar tarea de 2h a target_date (5h + 2h = 7h)
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {
+                "new_date": target_date.isoformat(),
+                "new_hours": "2.00",
+                "reason": "Intento de reprogramación con sobrecarga",
+            },
+            format="json",
+        )
+
+        # Debe responder con HTTP 409 Conflict
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("detail", response.data)
+        self.assertEqual(response.data.get("error"), "DailyOverloadConflict")
+
+        # La tarea NO debe haber sido modificada en la base de datos
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.scheduled_date, original_date)
+        self.assertEqual(self.task.estimated_hours, original_hours)
+
+        # NO debe haberse creado historial de reprogramación
+        self.assertEqual(RescheduleHistory.objects.filter(task=self.task).count(), 0)
+
+    def test_scenario_4h_plus_2h_equals_6h_allowed(self):
+        """
+        Escenario DOD: 4h existentes + 2h a reprogramar = 6h.
+        No supera el límite diario de 6 horas -> se guarda correctamente y se registra en RescheduleHistory.
+        """
+        target_date = date.today() + timedelta(days=6)
+        # 4h ya programadas en la fecha destino
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea existente de 4h",
+            scheduled_date=target_date,
+            estimated_hours=Decimal("4.00"),
+            status=LogisticTask.Status.PENDING,
+        )
+
+        original_date = self.task.scheduled_date
+
+        # Reprogramar tarea con 2h a target_date (4h + 2h = 6h <= 6h)
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {
+                "new_date": target_date.isoformat(),
+                "new_hours": "2.00",
+                "reason": "Ajuste de cronograma permitido",
+            },
+            format="json",
+        )
+
+        # Debe responder con HTTP 200 OK
+        self.assertEqual(response.status_code, 200)
+
+        # La tarea debe actualizarse en la base de datos
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.scheduled_date, target_date)
+        self.assertEqual(self.task.estimated_hours, Decimal("2.00"))
+
+        # Debe haberse registrado en RescheduleHistory
+        history = RescheduleHistory.objects.filter(task=self.task).first()
+        self.assertIsNotNone(history)
+        self.assertEqual(history.previous_date, original_date)
+        self.assertEqual(history.new_date, target_date)
+        self.assertEqual(history.new_hours, Decimal("2.00"))
+        self.assertEqual(history.reason, "Ajuste de cronograma permitido")

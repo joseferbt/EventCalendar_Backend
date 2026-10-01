@@ -33,11 +33,12 @@ class TaskService:
         """
         Calcula la suma de horas programadas por un usuario para una fecha determinada.
         Permite excluir una tarea (útil en actualizaciones o reprogramaciones).
+        Excluye las tareas completadas del cálculo.
         """
         queryset = LogisticTask.objects.filter(
             event__user=user,
             scheduled_date=target_date,
-        )
+        ).exclude(status=LogisticTask.Status.COMPLETED)
         if exclude_task_id:
             queryset = queryset.exclude(id=exclude_task_id)
 
@@ -58,7 +59,7 @@ class TaskService:
             user, target_date, exclude_task_id=exclude_task_id
         )
         projected_hours = current_hours + Decimal(str(additional_hours))
-        daily_limit = user.daily_hour_limit
+        daily_limit = getattr(user, "daily_hour_limit", None) or Decimal("6.00")
 
         if projected_hours > daily_limit:
             raise DailyOverloadConflict(
