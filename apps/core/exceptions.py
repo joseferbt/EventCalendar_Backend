@@ -20,6 +20,7 @@ class DailyOverloadConflict(APIException):
         current_hours=None,
         attempted_hours=None,
         daily_limit=None,
+        suggested_dates=None,
     ):
         if detail is not None and isinstance(detail, dict):
             super().__init__(detail=detail, code=code)
@@ -37,6 +38,7 @@ class DailyOverloadConflict(APIException):
                 "current_hours": str(current_hours),
                 "attempted_hours": str(attempted_hours),
                 "daily_hour_limit": str(daily_limit),
+                "suggested_dates": list(suggested_dates) if suggested_dates else [],
             }
             super().__init__(detail=payload, code=code)
         else:

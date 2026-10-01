@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from apps.events.models import Event
 from .models import LogisticTask, RescheduleHistory, TaskCategory
-from .services import TaskService
+from .services import MIN_TASK_HOURS, MAX_TASK_HOURS, TaskService
 
 
 class TaskCategorySerializer(serializers.ModelSerializer):
@@ -125,8 +125,14 @@ class RescheduleTaskSerializer(serializers.Serializer):
 
     new_date = serializers.DateField(required=False)
     scheduled_date = serializers.DateField(required=False)
-    new_hours = serializers.DecimalField(max_digits=4, decimal_places=2, required=False)
-    estimated_hours = serializers.DecimalField(max_digits=4, decimal_places=2, required=False)
+    new_hours = serializers.DecimalField(
+        max_digits=4, decimal_places=2, required=False,
+        min_value=MIN_TASK_HOURS, max_value=MAX_TASK_HOURS,
+    )
+    estimated_hours = serializers.DecimalField(
+        max_digits=4, decimal_places=2, required=False,
+        min_value=MIN_TASK_HOURS, max_value=MAX_TASK_HOURS,
+    )
     reason = serializers.CharField(required=False, default="Reprogramación de tarea")
 
     def validate(self, attrs):

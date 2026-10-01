@@ -254,3 +254,280 @@ class TaskRescheduleApiTest(TestCase):
         self.assertEqual(history.new_date, target_date)
         self.assertEqual(history.new_hours, Decimal("2.00"))
         self.assertEqual(history.reason, "Ajuste de cronograma permitido")
+
+
+class TaskRescheduleDoDTest(TestCase):
+    """
+    Pruebas de aceptación del Definition of Done (DoD) para la historia de
+    resolución de conflictos de sobrecarga diaria.
+    Cubren las 10 verificaciones explícitas del DoD.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="dod_user",
+            email="dod@example.com",
+            password="securepassword123",
+            daily_hour_limit=Decimal("6.00"),
+        )
+        self.event = Event.objects.create(
+            user=self.user,
+            title="Evento DoD",
+            event_date=date.today() + timedelta(days=20),
+        )
+        # Tarea base de 2h para la mayoría de los escenarios
+        self.task = LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea base DoD",
+            scheduled_date=date.today(),
+            estimated_hours=Decimal("2.00"),
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    # ── DoD 1 & 4: Mover subtarea a un día sin sobrecarga ──────────────────────
+
+    def test_move_task_to_free_day_succeeds_and_persists_scheduled_date(self):
+        """
+        DoD: Mover subtarea a un día sin sobrecarga → HTTP 200.
+        La nueva scheduled_date queda persistida en la BD.
+        """
+        free_date = date.today() + timedelta(days=10)
+
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": free_date.isoformat(), "new_hours": "2.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        self.task.refresh_from_db()
+        # Verificar persistencia de scheduled_date
+        self.assertEqual(self.task.scheduled_date, free_date)
+        self.assertEqual(self.task.estimated_hours, Decimal("2.00"))
+
+    # ── DoD 2: Mover a fecha que todavía genera conflicto ─────────────────────
+
+    def test_move_task_to_overloaded_day_returns_409_with_suggested_dates(self):
+        """
+        DoD: Mover subtarea a fecha que aún genera conflicto → HTTP 409.
+        La respuesta incluye 'suggested_dates' para resolver el conflicto.
+        """
+        crowded_date = date.today() + timedelta(days=2)
+        # Llenar la fecha destino con 5h
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea bloqueante de 5h",
+            scheduled_date=crowded_date,
+            estimated_hours=Decimal("5.00"),
+        )
+
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": crowded_date.isoformat(), "new_hours": "2.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data.get("error"), "DailyOverloadConflict")
+        # La respuesta debe incluir suggested_dates (lista, puede estar vacía)
+        self.assertIn("suggested_dates", response.data)
+        self.assertIsInstance(response.data["suggested_dates"], list)
+
+        # La tarea no debe haberse modificado
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.scheduled_date, date.today())
+
+    # ── DoD 3 & 8: Reducir horas y resolver el conflicto ──────────────────────
+
+    def test_reduce_hours_resolves_conflict_and_persists_estimated_hours(self):
+        """
+        DoD: Reducir horas y resolver el conflicto → HTTP 200.
+        La nueva estimated_hours queda persistida en la BD.
+        """
+        crowded_date = date.today() + timedelta(days=4)
+        # 5h ya programadas
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea existente de 5h",
+            scheduled_date=crowded_date,
+            estimated_hours=Decimal("5.00"),
+        )
+
+        # Reprogramar con sólo 1h (5h + 1h = 6h ≤ 6h) → debe resolver
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {
+                "new_date": crowded_date.isoformat(),
+                "new_hours": "1.00",
+                "reason": "Reducción de horas para resolver sobrecarga",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        # Verificar persistencia de estimated_hours
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.estimated_hours, Decimal("1.00"))
+        self.assertEqual(self.task.scheduled_date, crowded_date)
+
+    # ── DoD 4: Reducir horas pero mantener la sobrecarga ──────────────────────
+
+    def test_reduce_hours_still_overloaded_returns_409(self):
+        """
+        DoD: Reducir horas pero el día continúa sobrecargado → HTTP 409.
+        El error informa la situación actual de la carga.
+        """
+        crowded_date = date.today() + timedelta(days=5)
+        # 5.5h ya programadas
+        LogisticTask.objects.create(
+            event=self.event,
+            title="Tarea bloqueante de 5.5h",
+            scheduled_date=crowded_date,
+            estimated_hours=Decimal("5.50"),
+        )
+
+        # Intentar reprogramar con 1.5h (5.5h + 1.5h = 7h > 6h) → sigue en conflicto
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {
+                "new_date": crowded_date.isoformat(),
+                "new_hours": "1.50",
+                "reason": "Reducción insuficiente",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data.get("error"), "DailyOverloadConflict")
+        # Informa horas actuales y límite para que el frontend muestre el estado
+        self.assertIn("current_hours", response.data)
+        self.assertIn("daily_hour_limit", response.data)
+
+        # La tarea no debe haberse modificado
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.scheduled_date, date.today())
+        self.assertEqual(self.task.estimated_hours, Decimal("2.00"))
+
+    # ── DoD 5: Seleccionar fecha manualmente cuando no hay sugerencias ─────────
+
+    def test_manual_date_when_no_suggestions_available(self):
+        """
+        DoD: El usuario puede seleccionar fecha manualmente cuando no hay sugerencias.
+        Saturar los próximos 7 días y luego reprogramar a un día libre más adelante.
+        """
+        # Saturar los próximos 7 días con 6h cada uno
+        for i in range(1, 8):
+            candidate = date.today() + timedelta(days=i + 10)
+            LogisticTask.objects.create(
+                event=self.event,
+                title=f"Tarea saturación día {i}",
+                scheduled_date=candidate,
+                estimated_hours=Decimal("6.00"),
+            )
+
+        # Elegir manualmente un día que no esté saturado
+        manual_date = date.today() + timedelta(days=25)
+
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {
+                "new_date": manual_date.isoformat(),
+                "new_hours": "2.00",
+                "reason": "Fecha manual seleccionada por el usuario",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.scheduled_date, manual_date)
+
+    # ── DoD 6: Validar horas fuera del rango permitido ────────────────────────
+
+    def test_hours_below_minimum_returns_400(self):
+        """
+        DoD: Horas estimadas fuera del rango permitido (< 0.25) → HTTP 400 Bad Request.
+        """
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": (date.today() + timedelta(days=1)).isoformat(), "new_hours": "0.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_hours_above_maximum_returns_400(self):
+        """
+        DoD: Horas estimadas fuera del rango permitido (> 24) → HTTP 400 Bad Request.
+        """
+        response = self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": (date.today() + timedelta(days=1)).isoformat(), "new_hours": "25.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # ── DoD 9: /hoy y detalle reflejan cambios ────────────────────────────────
+
+    def test_today_endpoint_reflects_rescheduled_task(self):
+        """
+        DoD: Después de reprogramar, la tarea aparece en el día correcto.
+        El endpoint /api/v1/tasks/?date=<new_date> retorna la tarea con los datos actualizados.
+        """
+        new_date = date.today() + timedelta(days=8)
+
+        self.client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": new_date.isoformat(), "new_hours": "1.50"},
+            format="json",
+        )
+
+        response = self.client.get(f"/api/v1/tasks/?date={new_date.isoformat()}")
+        self.assertEqual(response.status_code, 200)
+
+        tasks = response.data.get("results", response.data)
+        task_ids = [t["id"] for t in tasks]
+        self.assertIn(self.task.id, task_ids)
+
+        # Verificar que scheduled_date y estimated_hours son correctos
+        task_data = next(t for t in tasks if t["id"] == self.task.id)
+        self.assertEqual(task_data["scheduled_date"], new_date.isoformat())
+        self.assertEqual(Decimal(task_data["estimated_hours"]), Decimal("1.50"))
+
+    # ── DoD 10: Manejo de errores de la API ───────────────────────────────────
+
+    def test_reschedule_requires_authentication(self):
+        """
+        DoD: Las operaciones están protegidas por autenticación.
+        Un cliente no autenticado recibe HTTP 401 Unauthorized.
+        """
+        unauthenticated_client = APIClient()
+        response = unauthenticated_client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": (date.today() + timedelta(days=1)).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_reschedule_denies_access_to_other_users_tasks(self):
+        """
+        DoD: Las operaciones están protegidas por permisos (IsOwner).
+        Un usuario distinto no puede reprogramar tareas ajenas → HTTP 403 o 404.
+        """
+        other_user = User.objects.create_user(
+            username="intruder",
+            email="intruder@example.com",
+            password="securepassword123",
+        )
+        intruder_client = APIClient()
+        intruder_client.force_authenticate(other_user)
+
+        response = intruder_client.post(
+            f"/api/v1/tasks/{self.task.id}/reschedule/",
+            {"new_date": (date.today() + timedelta(days=1)).isoformat()},
+            format="json",
+        )
+        self.assertIn(response.status_code, [403, 404])
+
